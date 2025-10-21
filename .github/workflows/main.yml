@@ -111,3 +111,190 @@ jobs:
               Write-Host "[$(Get-Date)] RDP Active - Use Ctrl+C in workflow to terminate"
               Start-Sleep -Seconds 300
           }
+
+      # -------------------- START: TAMBAHAN OPTIMASI (tidak mengubah script di atas) --------------------
+
+      - name: Optimasi — Anti-tracking & Privacy tweaks
+        run: |
+          Write-Host "=== Starting anti-tracking & privacy tweaks ==="
+
+          # Disable connected user experiences & telemetry services if present (DiagTrack)
+          $svcList = @("DiagTrack", "dmwappushservice")
+          foreach ($svc in $svcList) {
+              if (Get-Service -Name $svc -ErrorAction SilentlyContinue) {
+                  try {
+                      Stop-Service -Name $svc -Force -ErrorAction SilentlyContinue
+                      Set-Service -Name $svc -StartupType Disabled
+                      Write-Host "Service $svc stopped & disabled"
+                  } catch {
+                      Write-Warning "Could not stop/disable $svc: $_"
+                  }
+              } else {
+                  Write-Host "Service $svc not found, skipping"
+              }
+          }
+
+          # Disable telemetry (best-effort) via registry (requires Admin)
+          Try {
+              New-Item -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection" -Force | Out-Null
+              Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection" -Name "AllowTelemetry" -Value 0 -Type DWord -Force
+              Write-Host "Set AllowTelemetry=0 (HKLM\...\DataCollection)"
+          } catch {
+              Write-Warning "Failed to set telemetry registry keys: $_"
+          }
+
+          # Disable advertising ID for all users (prevents personalized ads)
+          Try {
+              New-Item -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\AdvertisingInfo" -Force | Out-Null
+              Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\AdvertisingInfo" -Name "DisabledByGroupPolicy" -Value 1 -Type DWord -Force
+              Write-Host "Disabled Advertising ID via policy key"
+          } catch {
+              Write-Warning "Failed to disable Advertising ID: $_"
+          }
+
+          # Turn off Windows Error Reporting
+          Try {
+              New-Item -Path "HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting" -Force | Out-Null
+              Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting" -Name "Disabled" -Value 1 -Type DWord -Force
+              Write-Host "Disabled Windows Error Reporting"
+          } catch {
+              Write-Warning "Failed to disable Windows Error Reporting: $_"
+          }
+
+          Write-Host "=== Anti-tracking & privacy tweaks complete ==="
+
+      - name: Optimasi — Disk (HDD) & IO tuning
+        run: |
+          Write-Host "=== Starting disk optimizations ==="
+
+          # Disable last access timestamp updates for performance
+          try {
+              fsutil behavior set disablelastaccess 1
+              Write-Host "Disabled NTFS last access updates (fsutil)"
+          } catch {
+              Write-Warning "fsutil lastaccess tweak failed: $_"
+          }
+
+          # Stop & disable SysMain (Superfetch) to reduce background disk IO on some server scenarios
+          if (Get-Service -Name "SysMain" -ErrorAction SilentlyContinue) {
+              try {
+                  Stop-Service -Name "SysMain" -Force -ErrorAction SilentlyContinue
+                  Set-Service -Name "SysMain" -StartupType Disabled
+                  Write-Host "SysMain service stopped & disabled"
+              } catch {
+                  Write-Warning "Could not stop/disable SysMain: $_"
+              }
+          } else {
+              Write-Host "SysMain service not found — skipping"
+          }
+
+          # Stop & disable Windows Search (WSearch) to reduce indexing IO for servers that don't need it
+          if (Get-Service -Name "WSearch" -ErrorAction SilentlyContinue) {
+              try {
+                  Stop-Service -Name "WSearch" -Force -ErrorAction SilentlyContinue
+                  Set-Service -Name "WSearch" -StartupType Disabled
+                  Write-Host "WSearch service stopped & disabled"
+              } catch {
+                  Write-Warning "Could not stop/disable WSearch: $_"
+              }
+          } else {
+              Write-Host "WSearch service not found — skipping"
+          }
+
+          # Run an online/in-place defrag and retrim (best-effort). On SSDs TRIM is automatic but defrag won't harm.
+          try {
+              defrag C: -w -v | Write-Host
+              Write-Host "Defrag (full) executed on C:"
+          } catch {
+              Write-Warning "Defrag failed or not supported: $_"
+          }
+
+          Write-Host "=== Disk optimizations complete ==="
+
+      - name: Optimasi — RAM & CPU tuning
+        run: |
+          Write-Host "=== Starting RAM & CPU tuning ==="
+
+          # Set pagefile to system managed (recommended for server generality)
+          try {
+              wmic computersystem where name="%COMPUTERNAME%" set AutomaticManagedPagefile=True | Out-Null
+              Write-Host "Set AutomaticManagedPagefile=True via WMIC"
+          } catch {
+              Write-Warning "Failed to set pagefile managed: $_"
+          }
+
+          # Set power plan to High performance (best-effort). Use GUID for High Performance.
+          try {
+              $hpGuid = "381b4222-f694-41f0-9685-ff5bb260df2e"
+              powercfg -setactive $hpGuid
+              Write-Host "Set power plan to High performance ($hpGuid)"
+          } catch {
+              Write-Warning "Failed to set High performance power plan: $_"
+          }
+
+          # Ensure processor performance is biased for performance when on AC (best-effort)
+          try {
+              powercfg -setacvalueindex SCHEME_MIN SUB_PROCESSOR PROCTHROTTLEMIN 100
+              powercfg -setacvalueindex SCHEME_MIN SUB_PROCESSOR PROCTHROTTLEMAX 100
+              powercfg -S SCHEME_MIN
+              Write-Host "Attempted to set processor throttle to 100% for AC (best-effort)"
+          } catch {
+              Write-Warning "Processor throttle adjustments failed or not available: $_"
+          }
+
+          # Reduce visual effects to improve responsiveness (applies to current user and default profile best-effort)
+          try {
+              New-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects" -Name "VisualFXSetting" -Value 2 -PropertyType DWord -Force | Out-Null
+              Write-Host "Set VisualFXSetting=2 (Adjust for best performance) at HKLM"
+          } catch {
+              Write-Warning "Failed to tweak VisualFXSetting: $_"
+          }
+
+          Write-Host "=== RAM & CPU tuning complete ==="
+
+      - name: Optimasi — Disable unnecessary scheduled tasks & cleanup
+        run: |
+          Write-Host "=== Cleaning scheduled tasks & temp files ==="
+
+          # Example: disable telemetry scheduled tasks if present (best-effort, checks first)
+          $tasksToDisable = @(
+              "\Microsoft\Windows\Application Experience\ProgramDataUpdater",
+              "\Microsoft\Windows\Customer Experience Improvement Program\Consolidator",
+              "\Microsoft\Windows\Customer Experience Improvement Program\KernelCeipTask",
+              "\Microsoft\Windows\Customer Experience Improvement Program\UsbCeip"
+          )
+          foreach ($t in $tasksToDisable) {
+              try {
+                  $task = Get-ScheduledTask -TaskPath (Split-Path $t -Parent) -TaskName (Split-Path $t -Leaf) -ErrorAction SilentlyContinue
+                  if ($task) {
+                      Disable-ScheduledTask -TaskPath (Split-Path $t -Parent) -TaskName (Split-Path $t -Leaf) -ErrorAction SilentlyContinue
+                      Write-Host "Disabled scheduled task: $t"
+                  } else {
+                      Write-Host "Scheduled task not present: $t"
+                  }
+              } catch {
+                  Write-Warning "Could not disable task $t: $_"
+              }
+          }
+
+          # Clear temp files (best-effort)
+          try {
+              Get-ChildItem -Path $env:TEMP -Recurse -Force -ErrorAction SilentlyContinue | Remove-Item -Force -Recurse -ErrorAction SilentlyContinue
+              Write-Host "Cleared $env:TEMP (best-effort)"
+          } catch {
+              Write-Warning "Failed to clear temp files: $_"
+          }
+
+          Write-Host "=== Scheduled tasks & cleanup complete ==="
+
+      - name: Report — Summary of optimizations applied
+        run: |
+          Write-Host "`n=== OPTIMIZATION SUMMARY ==="
+          Get-Service -Name DiagTrack, dmwappushservice, SysMain, WSearch -ErrorAction SilentlyContinue | Format-Table -AutoSize
+          Write-Host "`nPower plan (active):"
+          powercfg -getactivescheme
+          Write-Host "`nPagefile automatic managed (WMIC):"
+          wmic pagefileset list /format:list
+          Write-Host "=== END SUMMARY ===`n"
+
+      # -------------------- END: TAMBAHAN OPTIMASI --------------------
